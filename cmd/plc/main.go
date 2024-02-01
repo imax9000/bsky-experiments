@@ -233,7 +233,7 @@ func main() {
 		// Lowercase the lookup target
 		lookupTarget = strings.ToLower(lookupTarget)
 		if strings.HasPrefix(lookupTarget, "did:plc:") {
-			doc, err := plc.GetEntryForDID(c.Request.Context(), lookupTarget)
+			doc, err := plc.GetDocForDID(c.Request.Context(), lookupTarget)
 			if err != nil {
 				c.JSON(404, gin.H{
 					"error": err.Error(),

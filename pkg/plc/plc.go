@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bluesky-social/indigo/atproto/crypto"
 	"github.com/ericvolp12/bsky-experiments/pkg/consumer/store"
 	"github.com/ericvolp12/bsky-experiments/pkg/consumer/store/store_queries"
+	ssi "github.com/nuts-foundation/go-did"
+	"github.com/nuts-foundation/go-did/did"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/redis/go-redis/v9"
@@ -64,8 +68,76 @@ type DirectoryJSONLRow struct {
 }
 
 type Operation struct {
-	AlsoKnownAs []string `json:"alsoKnownAs"`
-	Type        string   `json:"type"`
+	AlsoKnownAs         []string             `json:"alsoKnownAs"`
+	Type                string               `json:"type"`
+	VerificationMethods map[string]string    `json:"verificationMethods,omitempty"`
+	RotationKeys        []string             `json:"rotationKeys,omitempty"`
+	Services            map[string]OpService `json:"services,omitempty"`
+}
+
+type OpService struct {
+	Type     string `json:"type"`
+	Endpoint string `json:"endpoint"`
+}
+
+func mapSlice[A any, B any](s []A, fn func(A) B) []B {
+	r := make([]B, 0, len(s))
+	for _, v := range s {
+		r = append(r, fn(v))
+	}
+	return r
+}
+
+func (op Operation) ToDIDDoc(ownerDid string) did.Document {
+	didValue := did.DID{
+		Method: "plc",
+		ID:     strings.TrimPrefix(ownerDid, "did:plc:"),
+	}
+
+	r := did.Document{
+		Context: []interface{}{
+			"https://www.w3.org/ns/did/v1",
+			"https://w3id.org/security/multikey/v1"},
+		ID:          didValue,
+		AlsoKnownAs: mapSlice(op.AlsoKnownAs, ssi.MustParseURI),
+	}
+
+	for id, s := range op.Services {
+		r.Service = append(r.Service, did.Service{
+			ID:              ssi.MustParseURI("#" + id),
+			Type:            s.Type,
+			ServiceEndpoint: s.Endpoint,
+		})
+	}
+
+	for id, m := range op.VerificationMethods {
+		idValue := did.DIDURL{
+			DID:      didValue,
+			Fragment: id,
+		}
+		r.VerificationMethod.Add(&did.VerificationMethod{
+			ID:                 idValue,
+			Type:               "Multikey",
+			Controller:         didValue,
+			PublicKeyMultibase: strings.TrimPrefix(m, "did:key:"),
+		})
+
+		key, err := crypto.ParsePublicDIDKey(m)
+		if err == nil {
+			context := ""
+			switch key.(type) {
+			case *crypto.PublicKeyK256:
+				context = "https://w3id.org/security/suites/secp256k1-2019/v1"
+			case *crypto.PublicKeyP256:
+				context = "https://w3id.org/security/suites/ecdsa-2019/v1"
+			}
+			if context != "" && !slices.Contains(r.Context, interface{}(context)) {
+				r.Context = append(r.Context, context)
+			}
+		}
+	}
+
+	return r
 }
 
 var tracer = otel.Tracer("plc-directory")
@@ -196,6 +268,7 @@ func (d *Directory) fetchDirectoryEntries(ctx context.Context) {
 		for _, entry := range newEntries {
 			if len(entry.Operation.AlsoKnownAs) > 0 {
 				handle := strings.TrimPrefix(entry.Operation.AlsoKnownAs[0], "at://")
+				opJSON, _ := json.Marshal(entry.Operation)
 
 				// Set both forward and backward mappings in redis
 
@@ -207,12 +280,13 @@ func (d *Directory) fetchDirectoryEntries(ctx context.Context) {
 					}
 				}
 
-				oldHandle := cmd.Val()
-				if oldHandle != "" {
-					pipeline.Del(ctx, d.RedisPrefix+":by_handle:"+oldHandle)
+				oldOp := Operation{}
+				err := json.Unmarshal([]byte(cmd.Val()), &oldOp)
+				if err == nil && len(oldOp.AlsoKnownAs) > 0 && oldOp.AlsoKnownAs[0] != "" {
+					pipeline.Del(ctx, d.RedisPrefix+":by_handle:"+strings.TrimPrefix(oldOp.AlsoKnownAs[0], "at://"))
 				}
 
-				pipeline.Set(ctx, d.RedisPrefix+":by_did:"+entry.Did, handle, 0)
+				pipeline.Set(ctx, d.RedisPrefix+":by_did:"+entry.Did, opJSON, 0)
 				pipeline.Set(ctx, d.RedisPrefix+":by_handle:"+handle, entry.Did, 0)
 
 				// Set the DID entry in the database
@@ -435,10 +509,30 @@ func (d *Directory) GetEntryForDID(ctx context.Context, did string) (DirectoryEn
 		return DirectoryEntry{}, cmd.Err()
 	}
 
+	op := Operation{}
+	if err := json.Unmarshal([]byte(cmd.Val()), &op); err != nil {
+		return DirectoryEntry{}, err
+	}
+	if len(op.AlsoKnownAs) <= 0 {
+		return DirectoryEntry{}, fmt.Errorf("no handles found in the last operation")
+	}
+
 	return DirectoryEntry{
 		Did: did,
-		AKA: cmd.Val(),
+		AKA: strings.TrimPrefix(op.AlsoKnownAs[0], "at://"),
 	}, nil
+}
+
+func (d *Directory) GetDocForDID(ctx context.Context, did_ string) (did.Document, error) {
+	cmd := d.RedisClient.Get(ctx, d.RedisPrefix+":by_did:"+did_)
+	if cmd.Err() != nil {
+		return did.Document{}, cmd.Err()
+	}
+	op := Operation{}
+	if err := json.Unmarshal([]byte(cmd.Val()), &op); err != nil {
+		return did.Document{}, err
+	}
+	return op.ToDIDDoc(did_), nil
 }
 
 func (d *Directory) GetBatchEntriesForDID(ctx context.Context, dids []string) ([]DirectoryEntry, error) {
@@ -456,9 +550,16 @@ func (d *Directory) GetBatchEntriesForDID(ctx context.Context, dids []string) ([
 	var entries []DirectoryEntry
 	for i, val := range cmd.Val() {
 		if val != nil {
+			handle := ""
+			op := Operation{}
+			if err := json.Unmarshal([]byte(val.(string)), &op); err == nil {
+				if len(op.AlsoKnownAs) > 0 {
+					handle = strings.TrimPrefix(op.AlsoKnownAs[0], "at://")
+				}
+			}
 			entries = append(entries, DirectoryEntry{
 				Did: dids[i],
-				AKA: val.(string),
+				AKA: handle,
 			})
 		}
 	}
