@@ -1,5 +1,3 @@
-recept kipyatka
-
 ## Build plc-mirror
 
 1. clone repo
