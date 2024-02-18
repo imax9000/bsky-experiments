@@ -5,11 +5,11 @@ services:
     image: 'redis:7-alpine'
     command: redis-server --save 60 1 --loglevel warning
     volumes:
-      - "/data/d2/plc/redis:/data:rw"
+      - "${DATA_HOME}/plc/redis:/data:rw"
   postgres:
     image: "postgres:16"
     volumes:
-      - "/data/d2/plc/postgres:/var/lib/postgresql/data:rw"
+      - "${DATA_HOME}/plc/postgres:/var/lib/postgresql/data:rw"
     restart: always
     environment:
       POSTGRES_DB: plc
