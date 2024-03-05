@@ -216,12 +216,12 @@ func (d *Directory) fetchDirectoryEntries(ctx context.Context) {
 		d.PLCRateLimiter.Wait(ctx)
 		start := time.Now()
 		resp, err := client.Do(req)
-		plcDirectoryRequestHistogram.WithLabelValues(fmt.Sprintf("%d", resp.StatusCode)).Observe(time.Since(start).Seconds())
 		if err != nil {
 			d.Logger.Errorf("failed to fetch directory entries: %+v", err)
 			resp.Body.Close()
 			break
 		}
+		plcDirectoryRequestHistogram.WithLabelValues(fmt.Sprintf("%d", resp.StatusCode)).Observe(time.Since(start).Seconds())
 
 		// Create a bufio scanner to read the response line by line
 		scanner := bufio.NewScanner(resp.Body)
