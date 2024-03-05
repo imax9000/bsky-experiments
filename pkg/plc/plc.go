@@ -218,7 +218,6 @@ func (d *Directory) fetchDirectoryEntries(ctx context.Context) {
 		resp, err := client.Do(req)
 		if err != nil {
 			d.Logger.Errorf("failed to fetch directory entries: %+v", err)
-			resp.Body.Close()
 			break
 		}
 		plcDirectoryRequestHistogram.WithLabelValues(fmt.Sprintf("%d", resp.StatusCode)).Observe(time.Since(start).Seconds())
