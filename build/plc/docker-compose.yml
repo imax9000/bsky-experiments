@@ -3,6 +3,10 @@ version: '3.8'
 services:
   redis:
     image: 'redis:7-alpine'
+    # To switch between persistence modes temporarily enable both.
+    # You can do this via redis-cli while redis is running.
+    # Detailed instructions: https://redis.io/docs/management/persistence/#how-i-can-switch-to-aof-if-im-currently-using-dumprdb-snapshots
+    #command: redis-server --loglevel warning --appendonly yes
     command: redis-server --save 60 1 --loglevel warning
     volumes:
       - "${DATA_HOME}/plc/redis:/data:rw"
